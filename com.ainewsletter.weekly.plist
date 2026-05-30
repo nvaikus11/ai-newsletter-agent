@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ainewsletter.weekly</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/nvaik11/Documents/projects/AI Newsletter Agent/newsletter.py</string>
+    </array>
+
+    <!-- Every Monday at 08:00 local time -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/nvaik11/Documents/projects/AI Newsletter Agent</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nvaik11/Documents/projects/AI Newsletter Agent/newsletter.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/nvaik11/Documents/projects/AI Newsletter Agent/newsletter.error.log</string>
+
+    <!-- Run even if the previous fire was missed (e.g. laptop was closed) -->
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

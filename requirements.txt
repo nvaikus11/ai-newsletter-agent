@@ -1,0 +1,15 @@
+# Core
+anthropic>=0.40.0      # LLM backend: Anthropic/Claude
+groq>=1.0.0            # LLM backend: Groq (free tier)
+schedule>=1.2.0        # daemon mode cross-platform scheduler
+
+# Fetching
+certifi>=2024.0.0      # SSL certificate fix (needed on macOS system Python)
+ddgs>=0.1.0            # DuckDuckGo search (no API key)
+feedparser>=6.0.0      # YouTube RSS feeds
+beautifulsoup4>=4.12.0 # HTML archive scraping
+requests>=2.31.0       # HTTP
+
+# Output
+markdown2>=2.4.0       # Markdown → HTML for email
+python-dotenv>=1.0.0   # .env file loading

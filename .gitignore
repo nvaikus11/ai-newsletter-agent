@@ -1,0 +1,14 @@
+# Secrets — never commit these
+.env
+
+# Generated output
+newsletters/
+*.log
+*.error.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
