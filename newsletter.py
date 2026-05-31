@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """
-AI Newsletter Agent — personalized weekly AI digest.
-Fetches content from newsletters, YouTube, and LinkedIn thought leaders,
-summarises with an LLM, and emails a Markdown digest every Monday morning.
+AI Newsletter Agent — AGENTIC edition.
 
-LLM_BACKEND options (set in .env):
-  anthropic  — Claude Sonnet. Needs ANTHROPIC_API_KEY (~$0.01/run).
-  groq       — llama-3.3-70b via Groq. Free tier, no credit card.
-  ollama     — any local model via Ollama. Fully offline, no API key.
+The LLM drives the entire research process via a ReAct loop:
+  - Decides what to search for each week
+  - Follows up on interesting stories
+  - Fetches full article content when snippets aren't enough
+  - Decides when it has enough to write
+  - Writes and sends the newsletter itself
+
+Tools available to the agent:
+  search_web     — DuckDuckGo search (no API key, last month)
+  fetch_page     — read the full text of any URL
+  send_newsletter — write and deliver the final digest
+
+LLM_BACKEND:
+  anthropic  — Claude Sonnet. Best for agentic reasoning. ~$0.05/run.
+  groq       — llama-3.3-70b via Groq. Free tier. Good quality.
 
 Usage:
   python3 newsletter.py            # run once now
   python3 newsletter.py --daemon   # stay running, fire every Monday 08:00
 """
 
-import os, re, ssl, sys, smtplib, time, argparse
+import os, re, sys, json, smtplib, time, argparse
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -25,64 +34,10 @@ from ddgs import DDGS
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# Fix macOS SSL cert lookup so ddgs/requests can reach HTTPS sites.
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
 
-# ── Sources ───────────────────────────────────────────────────────────────────
-
-NEWSLETTERS = [
-    {
-        "name": "The Rundown AI",
-        "query": '"The Rundown AI" newsletter',
-        "archive": "https://www.therundown.ai/archive",
-    },
-    {
-        "name": "Ben's Bites",
-        "query": '"Ben\'s Bites" OR "bensbites" AI newsletter',
-        "archive": "https://www.bensbites.com/archive",
-    },
-    {
-        "name": "AI Breakfast",
-        "query": '"AI Breakfast" newsletter AI',
-        "archive": "https://aibreakfast.beehiiv.com/archive",
-    },
-    {
-        "name": "Morning Brew AI",
-        "query": '"Morning Brew" AI artificial intelligence news',
-        "archive": None,
-    },
-]
-
-YOUTUBE_CHANNELS = [
-    {
-        "name": "Matt Wolfe",
-        "query": '"Matt Wolfe" YouTube AI tools 2025 OR 2026',
-        "rss_id": None,
-    },
-    {
-        "name": "All-In Podcast",
-        "query": '"All-In Podcast" AI 2025 OR 2026',
-        "rss_id": "UCESLZhusAkFfsNsApnjF_Cg",
-    },
-]
-
-THOUGHT_LEADERS = [
-    {
-        "name": "Andrew Ng",
-        "query": '"Andrew Ng" AI 2025 OR 2026',
-    },
-    {
-        "name": "Sam Altman",
-        "query": '"Sam Altman" OpenAI AI 2025 OR 2026',
-    },
-    {
-        "name": "Andrej Karpathy",
-        "query": '"Andrej Karpathy" AI 2025 OR 2026',
-    },
-]
-
+MAX_ITERATIONS = 20   # hard cap on agent loop turns
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -90,229 +45,399 @@ HEADERS = {
     )
 }
 
-# ── Fetchers ──────────────────────────────────────────────────────────────────
 
-def ddg_search(query: str, source_name: str, max_results: int = 5) -> list[dict]:
-    """Search DuckDuckGo (last month), with one retry on failure."""
-    items = []
-    for attempt in range(2):
-        try:
-            with DDGS() as ddgs:
-                results = ddgs.text(query, timelimit="m", max_results=max_results)
-                for r in results or []:
-                    items.append({
-                        "source": source_name,
-                        "title": r.get("title", ""),
-                        "url": r.get("href", ""),
-                        "snippet": r.get("body", "")[:800],
-                    })
-            time.sleep(0.6)
-            break
-        except Exception as e:
-            if attempt == 0:
-                time.sleep(2)
-            else:
-                print(f"    [WARN] search({source_name}): {e}")
-    return items
+# ── Tool implementations ───────────────────────────────────────────────────────
 
-
-def scrape_archive(url: str, source_name: str, max_items: int = 4) -> list[dict]:
-    """Scrape a beehiiv-style archive page for recent issue links."""
+def _search_web(query: str, max_results: int = 5) -> str:
+    """DuckDuckGo search scoped to the last month."""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        links = soup.find_all("a", href=re.compile(r"/p/"))
-        seen, items = set(), []
-        for link in links:
-            href = link["href"]
-            if href in seen or len(items) >= max_items:
-                continue
-            seen.add(href)
-            title = link.get_text(strip=True) or link.get("title", "")
-            if not title:
-                continue
-            base = f"https://{url.split('/')[2]}"
-            full_url = href if href.startswith("http") else base + href
-            items.append({"source": source_name, "title": title, "url": full_url, "snippet": ""})
-        return items
+        with DDGS() as ddgs:
+            raw = ddgs.text(query, timelimit="m", max_results=min(max_results, 10))
+            results = list(raw or [])
+        time.sleep(0.5)
     except Exception as e:
-        print(f"    [WARN] archive({source_name}): {e}")
-        return []
+        return f"Search error: {e}"
+
+    if not results:
+        return "No results found for that query."
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(
+            f"{i}. {r.get('title','')}\n"
+            f"   URL: {r.get('href','')}\n"
+            f"   {r.get('body','')[:400]}"
+        )
+    return "\n\n".join(lines)
 
 
-def fetch_youtube_rss(channel_id: str, channel_name: str) -> list[dict]:
-    """Fetch recent videos from a YouTube channel's public RSS feed."""
-    import feedparser
-    url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+def _fetch_page(url: str) -> str:
+    """Fetch and clean the main text of a webpage."""
     try:
-        feed = feedparser.parse(url)
-        return [
-            {
-                "source": channel_name,
-                "title": e.get("title", ""),
-                "url": e.get("link", ""),
-                "snippet": e.get("summary", "")[:500],
-            }
-            for e in feed.entries[:4]
-        ]
+        resp = requests.get(url, headers=HEADERS, timeout=12)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text[:5000]
     except Exception as e:
-        print(f"    [WARN] yt-rss({channel_name}): {e}")
-        return []
+        return f"Could not fetch page: {e}"
 
 
-def fetch_all_sources() -> dict[str, list[dict]]:
-    collected: dict[str, list[dict]] = {"newsletters": [], "youtube": [], "thought_leaders": []}
+# The agent writes the newsletter by calling this tool.
+# We store it here and send it after the loop exits.
+_pending: dict = {}
 
-    print("  Newsletters...")
-    for src in NEWSLETTERS:
-        items = scrape_archive(src["archive"], src["name"]) if src.get("archive") else []
-        if not items:
-            items = ddg_search(src["query"], src["name"])
-        print(f"    {src['name']}: {len(items)} item(s)")
-        collected["newsletters"].extend(items)
+def _send_newsletter(subject: str, body: str) -> str:
+    _pending["subject"] = subject
+    _pending["body"] = body
+    return "Newsletter queued — research session complete."
 
-    print("  YouTube channels...")
-    for ch in YOUTUBE_CHANNELS:
-        items = fetch_youtube_rss(ch["rss_id"], ch["name"]) if ch.get("rss_id") else []
-        if not items:
-            items = ddg_search(ch["query"], ch["name"])
-        print(f"    {ch['name']}: {len(items)} item(s)")
-        collected["youtube"].extend(items)
 
-    print("  Thought leaders...")
-    for leader in THOUGHT_LEADERS:
-        items = ddg_search(leader["query"], leader["name"])
-        print(f"    {leader['name']}: {len(items)} item(s)")
-        collected["thought_leaders"].extend(items)
+def execute_tool(name: str, args: dict) -> str:
+    dispatch = {
+        "search_web":      lambda: _search_web(args.get("query", ""), args.get("max_results", 5)),
+        "fetch_page":      lambda: _fetch_page(args.get("url", "")),
+        "send_newsletter": lambda: _send_newsletter(args.get("subject", ""), args.get("body", "")),
+    }
+    fn = dispatch.get(name)
+    return fn() if fn else f"Unknown tool: {name}"
 
-    return collected
 
-# ── LLM backends ──────────────────────────────────────────────────────────────
+# ── Tool schemas ───────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = (
-    "You are an expert AI industry analyst writing a personalized weekly newsletter. "
-    "Your reader closely follows AI — they want signal, not noise. "
-    "Write with clarity, sharp insight, and light enthusiasm. "
-    "Avoid filler phrases. Lead with what actually matters."
-)
+# Anthropic native format
+TOOLS_ANTHROPIC = [
+    {
+        "name": "search_web",
+        "description": (
+            "Search the web for recent AI news, articles, YouTube videos, and posts. "
+            "Covers the past month. Run multiple targeted searches — one broad, then "
+            "specific follow-ups on stories that matter."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query":       {"type": "string", "description": "Search query. Be specific."},
+                "max_results": {"type": "integer", "description": "Results to return (1–10). Default 5.", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_page",
+        "description": (
+            "Fetch the full text of a webpage. Use when a search snippet isn't enough "
+            "to understand a story — read the full article, newsletter issue, or post."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Full URL to fetch."},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "send_newsletter",
+        "description": (
+            "Write and send the completed newsletter. Call this once you have researched "
+            "enough (aim for 8–15 searches). This ends the research session."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string", "description": "Email subject line."},
+                "body":    {"type": "string", "description": "Full newsletter in Markdown."},
+            },
+            "required": ["subject", "body"],
+        },
+    },
+]
 
-def _user_prompt(content_block: str) -> str:
-    week_str = datetime.now().strftime("%B %d, %Y")
-    return f"""Here is raw AI content collected from the past ~30 days. Focus on the most recent and significant developments:
+# OpenAI-compatible format (Groq)
+TOOLS_OPENAI = [
+    {
+        "type": "function",
+        "function": {
+            "name":        t["name"],
+            "description": t["description"],
+            "parameters":  t["input_schema"],
+        },
+    }
+    for t in TOOLS_ANTHROPIC
+]
 
-{content_block}
 
-Write a polished Monday-morning AI newsletter digest for {week_str}. Use this exact structure:
+# ── System prompt ──────────────────────────────────────────────────────────────
 
-# Your AI Week in Review — {week_str}
+def system_prompt() -> str:
+    today = datetime.now().strftime("%A, %B %d, %Y")
+    week_label = datetime.now().strftime("%B %d, %Y")
+    return f"""You are an expert AI industry analyst and newsletter curator. Today is {today}.
+
+Every Monday morning you research the past week's AI developments and write a sharp digest.
+Your reader closely follows AI — they want signal, not noise.
+
+━━ YOUR RESEARCH PROCESS ━━
+1. Start with a broad search: "AI news this week" or "biggest AI announcements {today[:4]}"
+2. Dig into preferred sources: The Rundown AI, Ben's Bites, AI Breakfast, Morning Brew AI
+3. Search for recent YouTube content from Matt Wolfe and All-In Podcast
+4. Search for posts and insights from Andrew Ng, Sam Altman, Andrej Karpathy
+5. When you find something important or surprising → fetch the full page for details
+6. Follow interesting threads: if a model launched, search for reactions and benchmarks
+7. After 8–15 searches, when you have a clear picture → call send_newsletter
+
+━━ NEWSLETTER FORMAT (use exactly) ━━
+# Your AI Week in Review — {week_label}
 
 ## TL;DR
-5 bullet points. One punchy sentence each. Cover only the biggest stories.
+- [bullet 1]
+- [bullet 2]
+- [bullet 3]
+- [bullet 4]
+- [bullet 5]
+(5 bullets, one punchy sentence each, biggest stories only)
 
 ## This Week in AI
-3–4 short sections, each with a **bold heading**. 2–3 sentences per section. Explain the *significance*, not just the event.
+**[Theme heading]**
+[2–3 sentences explaining what happened and why it matters]
+
+(repeat for 3–4 themes)
 
 ## From the Feeds
-Highlight the single most valuable newsletter issue or YouTube video. 2 sentences on why it's worth it. Include the URL.
+[Highlight the single most valuable newsletter issue or YouTube video. 2 sentences + URL.]
 
 ## Thought Leaders
-What are Andrew Ng, Sam Altman, and Andrej Karpathy thinking or doing lately? 1–2 sentences per person. Skip anyone with no meaningful results.
+**Andrew Ng:** [1–2 sentences]
+**Sam Altman:** [1–2 sentences]
+**Andrej Karpathy:** [1–2 sentences]
+(skip anyone with no meaningful results this week)
 
 ## One Thing to Try
-One concrete, actionable suggestion based on this week's content.
+[One concrete, actionable recommendation based on this week's content]
 
----
-Keep the total under 650 words. Be direct. No filler. Format cleanly in Markdown."""
-
-
-def _format_items(items: list[dict]) -> str:
-    if not items:
-        return "(no results)\n"
-    out = ""
-    for item in items:
-        if not item.get("title") and not item.get("snippet"):
-            continue
-        out += f"\n---\nSOURCE: {item['source']}\nTITLE: {item['title']}\nURL: {item['url']}\n"
-        if item.get("snippet"):
-            out += f"SNIPPET: {item['snippet']}\n"
-    return out
+━━ STYLE ━━
+Under 700 words total. Direct. No filler. Explain significance not just events."""
 
 
-def _build_content_block(collected: dict) -> str:
+# ── Agentic loops ──────────────────────────────────────────────────────────────
+
+def _log_tool_call(name: str, args: dict):
+    preview = args.get("query") or args.get("url") or args.get("subject") or ""
+    print(f"    ↳ {name}({preview[:70]})")
+
+
+def _force_send_prompt() -> str:
     return (
-        "=== NEWSLETTERS ===\n" + _format_items(collected["newsletters"]) +
-        "\n=== YOUTUBE ===\n" + _format_items(collected["youtube"]) +
-        "\n=== THOUGHT LEADERS ===\n" + _format_items(collected["thought_leaders"])
+        "You have used your full research budget. "
+        "Call send_newsletter now with the best newsletter you can write from what you have gathered."
     )
 
 
-def _llm_anthropic(prompt: str) -> str:
+def _run_anthropic() -> bool:
     from anthropic import Anthropic
     client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return msg.content[0].text
+
+    messages = [{"role": "user", "content": "Research and send this week's AI newsletter."}]
+    forced = False
+
+    for turn in range(MAX_ITERATIONS + 1):
+        # On the final turn, force the agent to send whatever it has
+        if turn == MAX_ITERATIONS and not _pending:
+            print(f"  [Agent] Hit {MAX_ITERATIONS}-turn limit — forcing send.")
+            messages.append({"role": "user", "content": _force_send_prompt()})
+            forced = True
+
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=system_prompt(),
+            tools=TOOLS_ANTHROPIC,
+            messages=messages,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+
+        # Log agent's text commentary
+        for block in response.content:
+            if hasattr(block, "text") and block.text.strip():
+                snippet = block.text.strip().replace("\n", " ")
+                print(f"  [Agent] {snippet[:140]}{'...' if len(snippet) > 140 else ''}")
+
+        if response.stop_reason == "end_turn":
+            break
+
+        # Execute tool calls
+        tool_results, newsletter_sent = [], False
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            _log_tool_call(block.name, block.input)
+            result = execute_tool(block.name, block.input)
+            if block.name == "send_newsletter":
+                newsletter_sent = True
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result,
+            })
+
+        messages.append({"role": "user", "content": tool_results})
+
+        if newsletter_sent or forced:
+            break
+
+    return bool(_pending)
 
 
-def _llm_groq(prompt: str) -> str:
+def _extract_failed_gen(exc: Exception) -> str:
+    """Pull 'failed_generation' text out of a Groq 400 error, if present."""
+    raw = getattr(exc, "response", None)
+    if raw is None:
+        return ""
+    try:
+        return raw.json().get("error", {}).get("failed_generation", "")
+    except Exception:
+        return ""
+
+
+def _run_groq() -> bool:
+    """
+    Two-phase Groq agent.
+
+    Phase 1 — Research only (send_newsletter hidden from the model).
+              Catches the case where the model skips to writing early —
+              that content is saved as the newsletter draft.
+
+    Phase 2 — Write: fresh lean context (tool results only, no chat history).
+              Forces send_newsletter; falls back to capturing plain-text output
+              if the model still won't use the tool.
+    """
     from groq import Groq
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    chat = client.chat.completions.create(
-        model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=2048,
-        temperature=0.6,
-    )
-    return chat.choices[0].message.content
+    model  = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+    week_label = datetime.now().strftime("%B %d, %Y")
 
+    research_tools = [t for t in TOOLS_OPENAI if t["function"]["name"] != "send_newsletter"]
 
-def _llm_ollama(prompt: str) -> str:
-    """Call a local Ollama instance (must be running: `ollama serve`)."""
-    model = os.getenv("OLLAMA_MODEL", "llama3.2")
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    resp = requests.post(
-        f"{base_url}/api/chat",
-        json={
-            "model": model,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
+    messages: list[dict] = [
+        {"role": "system", "content": system_prompt()},
+        {
+            "role": "user",
+            "content": (
+                "Research this week's AI news using search_web and fetch_page. "
+                "Cover: The Rundown AI, Ben's Bites, AI Breakfast, Morning Brew AI, "
+                "Matt Wolfe, All-In Podcast, Andrew Ng, Sam Altman, Andrej Karpathy. "
+                "Do 8–12 searches. Only call tools — do not write the newsletter yet."
+            ),
         },
-        timeout=300,
+    ]
+
+    # ── Phase 1: research ──────────────────────────────────────────────────
+    print("  [Phase 1] Researching...")
+    for _turn in range(MAX_ITERATIONS):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=research_tools,
+                tool_choice="auto",
+                max_tokens=2048,
+            )
+        except Exception as e:
+            # Model jumped ahead and tried to write the newsletter.
+            # Grab it from failed_generation and short-circuit to send.
+            draft = _extract_failed_gen(e)
+            if draft and len(draft) > 300:
+                print("  [Agent] Model wrote newsletter early — capturing and sending.")
+                _send_newsletter(f"Your AI Week in Review — {week_label}", draft)
+                return True
+            print(f"  [WARN] Phase 1 API error: {e}")
+            break
+
+        msg = response.choices[0].message
+
+        assistant_entry: dict = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            assistant_entry["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in msg.tool_calls
+            ]
+        messages.append(assistant_entry)
+
+        if msg.content and msg.content.strip():
+            snippet = msg.content.strip().replace("\n", " ")
+            print(f"  [Agent] {snippet[:140]}{'...' if len(snippet) > 140 else ''}")
+
+        if not msg.tool_calls:
+            print("  [Agent] Research complete.")
+            break
+
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments)
+            _log_tool_call(tc.function.name, args)
+            result = execute_tool(tc.function.name, args)
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+
+    if _pending:          # newsletter already captured from an early draft
+        return True
+
+    # ── Phase 2: write — fresh lean context ───────────────────────────────
+    print("  [Phase 2] Writing newsletter...")
+
+    # Use only tool results — skip the full chat history to save token budget.
+    research_block = "\n\n---\n\n".join(
+        m["content"] for m in messages
+        if m.get("role") == "tool" and m.get("content")
     )
-    resp.raise_for_status()
-    return resp.json()["message"]["content"]
+
+    write_messages = [
+        {"role": "system", "content": system_prompt()},
+        {
+            "role": "user",
+            "content": (
+                f"Here is your research for this week:\n\n{research_block}\n\n"
+                f"Call send_newsletter with the complete Markdown newsletter "
+                f"(follow the format in your instructions). "
+                f"Subject: 'Your AI Week in Review — {week_label}'"
+            ),
+        },
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=write_messages,
+            tools=TOOLS_OPENAI,
+            tool_choice={"type": "function", "function": {"name": "send_newsletter"}},
+            max_tokens=4096,
+        )
+        msg = response.choices[0].message
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                if tc.function.name == "send_newsletter":
+                    args = json.loads(tc.function.arguments)
+                    _log_tool_call(tc.function.name, args)
+                    execute_tool(tc.function.name, args)
+
+    except Exception as e:
+        draft = _extract_failed_gen(e)
+        if draft and len(draft) > 300:
+            print("  [Agent] Captured newsletter from model text output.")
+            _send_newsletter(f"Your AI Week in Review — {week_label}", draft)
+        else:
+            print(f"  [WARN] Phase 2 failed: {e}")
+
+    return bool(_pending)
 
 
-def build_newsletter(collected: dict) -> str:
-    total = sum(len(v) for v in collected.values())
-    if total == 0:
-        return "# AI Week in Review\n\nNo content fetched this week. Check your network and try again."
-
-    content_block = _build_content_block(collected)
-    prompt = _user_prompt(content_block)
-
-    backend = os.getenv("LLM_BACKEND", "anthropic").lower()
-    generators = {"anthropic": _llm_anthropic, "groq": _llm_groq, "ollama": _llm_ollama}
-
-    if backend not in generators:
-        sys.exit(f"Unknown LLM_BACKEND '{backend}'. Choose: anthropic, groq, ollama")
-
-    print(f"  Using backend: {backend}")
-    return generators[backend](prompt)
-
-
-# ── Email ─────────────────────────────────────────────────────────────────────
+# ── Email delivery ─────────────────────────────────────────────────────────────
 
 def send_email(subject: str, body_md: str):
     gmail_user = os.environ["GMAIL_USER"]
@@ -335,9 +460,8 @@ def send_email(subject: str, body_md: str):
   strong {{color:#111}}
 </style></head>
 <body>{html_body}
-<hr><p style="color:#888;font-size:.8em">
-  AI Newsletter Agent · Sent to {recipient}
-</p></body></html>"""
+<hr><p style="color:#888;font-size:.8em">AI Newsletter Agent · {recipient}</p>
+</body></html>"""
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -352,82 +476,73 @@ def send_email(subject: str, body_md: str):
     print(f"  Email sent → {recipient}")
 
 
-# ── Core run ──────────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def validate_env():
-    backend = os.getenv("LLM_BACKEND", "anthropic").lower()
-    required_keys = {
-        "anthropic": ["ANTHROPIC_API_KEY"],
-        "groq":      ["GROQ_API_KEY"],
-        "ollama":    [],  # Ollama is local, no key needed
-    }
-    base_required = ["GMAIL_USER", "GMAIL_APP_PASSWORD"]
-    missing = [k for k in base_required + required_keys.get(backend, []) if not os.getenv(k)]
+    backend = os.getenv("LLM_BACKEND", "groq").lower()
+    required = {"anthropic": ["ANTHROPIC_API_KEY"], "groq": ["GROQ_API_KEY"]}
+    missing = [
+        k for k in ["GMAIL_USER", "GMAIL_APP_PASSWORD"] + required.get(backend, [])
+        if not os.getenv(k)
+    ]
     if missing:
-        sys.exit(
-            f"Missing env vars: {', '.join(missing)}\n"
-            "Copy .env.example to .env and fill in the values."
-        )
+        sys.exit(f"Missing env vars: {', '.join(missing)}\nFill in .env and retry.")
+    if backend not in ("anthropic", "groq"):
+        sys.exit(f"LLM_BACKEND '{backend}' not supported in agentic mode. Use: anthropic or groq")
 
 
 def run_once():
+    # Reset state for this run (important in daemon mode)
+    _pending.clear()
+
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    print(f"[{ts}] AI Newsletter Agent — starting run...")
+    print(f"\n[{ts}] AI Newsletter Agent — agentic run starting")
     validate_env()
 
-    print("Fetching content...")
-    collected = fetch_all_sources()
-    total = sum(len(v) for v in collected.values())
-    print(f"Collected {total} items.")
+    backend = os.getenv("LLM_BACKEND", "groq").lower()
+    print(f"Backend : {backend}")
+    print(f"Watching: The Rundown AI · Ben's Bites · AI Breakfast · Morning Brew")
+    print(f"          Matt Wolfe · All-In Podcast · Andrew Ng · Sam Altman · Karpathy")
+    print("─" * 56)
 
-    print("Generating newsletter...")
-    newsletter_md = build_newsletter(collected)
+    runners = {"anthropic": _run_anthropic, "groq": _run_groq}
+    success = runners[backend]()
 
-    week_str = datetime.now().strftime("%B %d, %Y")
-    subject = f"Your AI Week in Review — {week_str}"
+    print("─" * 56)
+
+    if not success:
+        sys.exit("Agent finished without producing a newsletter. Check output above.")
+
+    subject = _pending["subject"]
+    body    = _pending["body"]
 
     print("Sending email...")
-    send_email(subject, newsletter_md)
+    send_email(subject, body)
 
     archive_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "newsletters")
     os.makedirs(archive_dir, exist_ok=True)
-    path = os.path.join(archive_dir, f"{datetime.now().strftime('%Y-%m-%d')}.md")
-    with open(path, "w") as f:
-        f.write(newsletter_md)
-    print(f"  Archived → {path}")
-    print("Done!")
+    archive_path = os.path.join(archive_dir, f"{datetime.now().strftime('%Y-%m-%d')}.md")
+    with open(archive_path, "w") as f:
+        f.write(body)
+    print(f"  Archived → {archive_path}")
+    print("Done!\n")
 
-
-# ── Daemon mode (cross-platform scheduler) ────────────────────────────────────
 
 def run_daemon():
-    """Stay alive and fire every Monday at 08:00 local time. Works on any OS."""
     import schedule
-    print("Daemon mode: will run every Monday at 08:00. Press Ctrl+C to stop.")
+    print("Daemon mode — will fire every Monday at 08:00. Ctrl+C to stop.")
     schedule.every().monday.at("08:00").do(run_once)
-
-    # Run immediately on first start if today is Monday and it hasn't run yet.
     if datetime.now().weekday() == 0:
         print("Today is Monday — running now...")
         run_once()
-
     while True:
         schedule.run_pending()
         time.sleep(30)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AI Newsletter Agent")
-    parser.add_argument(
-        "--daemon",
-        action="store_true",
-        help="Stay running and fire every Monday at 08:00 (cross-platform alternative to cron/launchd)",
-    )
+    parser = argparse.ArgumentParser(description="AI Newsletter Agent (Agentic)")
+    parser.add_argument("--daemon", action="store_true",
+                        help="Stay running, fire every Monday at 08:00")
     args = parser.parse_args()
-
-    if args.daemon:
-        run_daemon()
-    else:
-        run_once()
+    run_daemon() if args.daemon else run_once()
