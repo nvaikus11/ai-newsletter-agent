@@ -7,8 +7,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>/Users/nvaik11/Documents/projects/AI Newsletter Agent/newsletter.py</string>
+        <string>__PYTHON_PATH__</string>
+        <string>__SCRIPT_DIR__/newsletter.py</string>
     </array>
 
     <!-- Every Monday at 08:00 local time -->
@@ -23,15 +23,14 @@
     </dict>
 
     <key>WorkingDirectory</key>
-    <string>/Users/nvaik11/Documents/projects/AI Newsletter Agent</string>
+    <string>__SCRIPT_DIR__</string>
 
     <key>StandardOutPath</key>
-    <string>/Users/nvaik11/Documents/projects/AI Newsletter Agent/newsletter.log</string>
+    <string>__SCRIPT_DIR__/newsletter.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/nvaik11/Documents/projects/AI Newsletter Agent/newsletter.error.log</string>
+    <string>__SCRIPT_DIR__/newsletter.error.log</string>
 
-    <!-- Run even if the previous fire was missed (e.g. laptop was closed) -->
     <key>RunAtLoad</key>
     <false/>
 </dict>

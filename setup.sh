@@ -27,11 +27,10 @@ echo "Open .env and fill in your credentials before continuing:"
 echo "  $SCRIPT_DIR/.env"
 echo ""
 echo "  LLM options (pick one):"
-echo "  A) Groq  — free, sign up at console.groq.com"
-echo "  B) Ollama — local/offline, install at ollama.com then: ollama pull llama3.2"
-echo "  C) Anthropic — ~\$0.01/run, sign up at console.anthropic.com"
+echo "  A) Groq      — free, sign up at console.groq.com"
+echo "  B) Anthropic — ~\$0.05/run, sign up at console.anthropic.com"
 echo ""
-echo "  Gmail: you need a Gmail App Password (not your normal password)."
+echo "  Gmail: you need a Gmail App Password (not your regular password)."
 echo "  Get one at: myaccount.google.com → Security → App passwords"
 echo ""
 read -p "Press Enter once you've filled in .env to continue..."
@@ -39,15 +38,18 @@ read -p "Press Enter once you've filled in .env to continue..."
 # ── 3. Schedule ──────────────────────────────────────────────────────────────
 echo ""
 OS="$(uname -s)"
+PYTHON_PATH="$("$PYTHON" -c 'import sys; print(sys.executable)')"
 
 if [ "$OS" = "Darwin" ]; then
-    # macOS — launchd (fires even if terminal is closed)
+    # macOS — launchd (fires even when Terminal is closed)
     PLIST_SRC="$SCRIPT_DIR/com.ainewsletter.weekly.plist"
     PLIST_DST="$HOME/Library/LaunchAgents/com.ainewsletter.weekly.plist"
 
-    # Patch the plist with the correct python3 path
-    PYTHON_PATH="$("$PYTHON" -c 'import sys; print(sys.executable)')"
-    sed "s|/usr/bin/python3|$PYTHON_PATH|g" "$PLIST_SRC" > "$PLIST_DST"
+    # Substitute both __PYTHON_PATH__ and __SCRIPT_DIR__ in the plist template
+    sed \
+        -e "s|__PYTHON_PATH__|$PYTHON_PATH|g" \
+        -e "s|__SCRIPT_DIR__|$SCRIPT_DIR|g" \
+        "$PLIST_SRC" > "$PLIST_DST"
 
     launchctl unload "$PLIST_DST" 2>/dev/null || true
     launchctl load "$PLIST_DST"
@@ -56,8 +58,7 @@ if [ "$OS" = "Darwin" ]; then
 
 elif [ "$OS" = "Linux" ]; then
     # Linux — cron
-    PYTHON_PATH="$("$PYTHON" -c 'import sys; print(sys.executable)')"
-    CRON_JOB="0 8 * * 1 cd \"$SCRIPT_DIR\" && $PYTHON_PATH newsletter.py >> newsletter.log 2>&1"
+    CRON_JOB="0 8 * * 1 cd \"$SCRIPT_DIR\" && $PYTHON_PATH newsletter.py >> \"$SCRIPT_DIR/newsletter.log\" 2>&1"
     # Add only if not already present
     ( crontab -l 2>/dev/null | grep -v "newsletter.py"; echo "$CRON_JOB" ) | crontab -
     echo "Scheduled via cron: every Monday at 08:00."
@@ -69,9 +70,10 @@ else
     echo "Use daemon mode instead:"
     echo "  python3 newsletter.py --daemon"
     echo ""
-    echo "Or on Windows, create a Task Scheduler job pointing to:"
-    echo "  $PYTHON $SCRIPT_DIR/newsletter.py"
-    echo "  Schedule: weekly, Monday, 08:00"
+    echo "Or on Windows, open Task Scheduler and create a weekly job:"
+    echo "  Program : $PYTHON_PATH"
+    echo "  Arguments: $SCRIPT_DIR/newsletter.py"
+    echo "  Schedule : weekly, Monday, 08:00"
 fi
 
 # ── 4. Test run ──────────────────────────────────────────────────────────────

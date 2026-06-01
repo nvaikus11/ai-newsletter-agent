@@ -16,7 +16,7 @@ Tools available to the agent:
 
 LLM_BACKEND:
   anthropic  — Claude Sonnet. Best for agentic reasoning. ~$0.05/run.
-  groq       — llama-3.3-70b via Groq. Free tier. Good quality.
+  groq       — llama-4-scout-17b via Groq. Free tier. Good quality.
 
 Usage:
   python3 newsletter.py            # run once now
