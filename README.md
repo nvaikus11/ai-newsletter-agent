@@ -139,7 +139,7 @@ All sources and settings live inside `newsletter.py`. Open it in any editor and 
 
 **Change the sources** — edit the `system_prompt()` function, which tells the agent which sources to search:
 ```python
-# Around line 100 — update source names, add new ones, remove any
+# Around line 176 — update source names, add new ones, remove any
 "Cover: The Rundown AI, Ben's Bites, AI Breakfast ..."
 ```
 
